@@ -133,6 +133,29 @@ CAT_COLS = [
     'Penghasilan_Ayah(22)', 'Penghasilan_Ibu(26)', 'Output_Class'
 ]
 
+# Label deskriptif untuk kolom yang nilainya berupa angka di dataset.
+# Key = nilai string yang muncul di dataset; Value = label ramah untuk user
+LABEL_OVERRIDE = {
+    'Prestasi(50)': {
+        '0': 'Tidak Ada Prestasi',
+        '1': 'Prestasi Tingkat Sekolah',
+        '2': 'Prestasi Tingkat Kab/Kota',
+        '3': 'Prestasi Tingkat Nasional',
+    },
+    'Kepemilikan_Rumah(29)': {
+        '0': 'Milik Sendiri',
+        '1': 'Sewa / Kontrak',
+        '2': 'Numpang / Menumpang',
+        '3': 'Lainnya',
+    },
+    'Sumber_Daya_Listrik(31)': {
+        '0': 'Tidak Ada Listrik',
+        '1': 'PLN (Listrik Negara)',
+        '2': 'Genset / Generator',
+        '3': 'Energi Solar / Panel Surya',
+    },
+}
+
 PLOTLY_BASE = dict(
     paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
     font=dict(family='DM Sans', color='#e2e8f0'),
@@ -160,10 +183,20 @@ def process_data(raw_df):
         else:
             cont_val.append(col)
 
+    # Simpan mapping label asli → encoded (sorted alphabetically by LabelEncoder)
+    label_maps = {}   # col → {encoded_int: label_display_str}
+    encode_maps = {}  # col → {label_display_str: encoded_int}
     le = LabelEncoder()
     for col in CAT_COLS:
         if col in df.columns:
-            df[col] = le.fit_transform(df[col].astype(str))
+            raw_vals = df[col].astype(str)
+            classes = sorted(raw_vals.unique())   # urutan sama dengan LabelEncoder
+            override = LABEL_OVERRIDE.get(col, {})
+            # label_display: pakai override jika ada, fallback ke nilai asli dataset
+            display_labels = [override.get(v, v) for v in classes]
+            label_maps[col]  = {i: display_labels[i] for i in range(len(classes))}
+            encode_maps[col] = {display_labels[i]: i  for i in range(len(classes))}
+            df[col] = le.fit_transform(raw_vals)
 
     cont_no_target = [c for c in cont_val if c != 'Output_Class']
     if cont_no_target:
@@ -175,7 +208,7 @@ def process_data(raw_df):
     X_train, X_test, y_train, y_test = train_test_split(
         feature, target, shuffle=True, test_size=0.3, random_state=42
     )
-    return df, X_train, X_test, y_train, y_test, cate_val, cont_val
+    return df, X_train, X_test, y_train, y_test, cate_val, cont_val, label_maps, encode_maps
 
 # ─── MODEL TRAINING ────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
@@ -355,7 +388,7 @@ if uploaded is None:
 # ─── LOAD & PROCESS ────────────────────────────────────────────────────────────
 try:
     raw_df = pd.read_csv(uploaded)
-    df, X_train, X_test, y_train, y_test, cate_val, cont_val = process_data(raw_df)
+    df, X_train, X_test, y_train, y_test, cate_val, cont_val, label_maps, encode_maps = process_data(raw_df)
 except Exception as e:
     st.error(f"❌ Error memproses data: {e}")
     st.stop()
@@ -640,47 +673,112 @@ elif page == "🔮 Prediksi":
         pred_lgbm = train_lgbm_goss(X_train, y_train)
         pred_xgb  = train_xgb_gbtree(X_train, y_train)
 
+    # ── Helper: bangun options selectbox dari label_maps (label asli dataset) ──
+    def cat_options(col):
+        """Return list of label strings dari dataset asli, sorted by encoded index."""
+        if col in label_maps:
+            return [label_maps[col][i] for i in sorted(label_maps[col].keys())]
+        return []
+
+    def to_encoded(col, label):
+        """Konversi label string → integer encoded untuk model."""
+        return encode_maps.get(col, {}).get(str(label), 0)
+
+    # ── Form input ──
     with st.form("pred_form"):
         st.markdown("### 📝 Input Data Mahasiswa")
         c1, c2, c3 = st.columns(3)
+
         with c1:
             st.markdown("**Sosial Ekonomi**")
-            status_dtks      = st.selectbox("Status DTKS", list(range(0,6)),
-                                             help="0=Tidak ada, makin besar makin sejahtera")
-            status_p3ke      = st.selectbox("Status P3KE", list(range(0,10)))
-            kepemilikan_rmh  = st.selectbox("Kepemilikan Rumah", [0,1,2,3],
-                                             format_func=lambda x:{0:'Milik Sendiri',1:'Sewa/Kontrak',2:'Numpang',3:'Lainnya'}.get(x,str(x)))
+
+            opts_dtks = cat_options('Status_DTKS(7)')
+            sel_dtks = st.selectbox(
+                "Status DTKS",
+                options=opts_dtks if opts_dtks else list(range(6)),
+                help="Pilih status DTKS mahasiswa sesuai data"
+            )
+
+            opts_p3ke = cat_options('Status_P3KE(8)')
+            sel_p3ke = st.selectbox(
+                "Status P3KE",
+                options=opts_p3ke if opts_p3ke else list(range(10))
+            )
+
+            opts_rmh = cat_options('Kepemilikan_Rumah(29)')
+            sel_rmh = st.selectbox(
+                "Kepemilikan Rumah",
+                options=opts_rmh if opts_rmh else ["Milik Sendiri","Sewa/Kontrak","Numpang","Lainnya"]
+            )
+
         with c2:
             st.markdown("**Data Penghasilan**")
-            penghasilan_ayah = st.selectbox("Penghasilan Ayah", list(range(0,15)))
-            penghasilan_ibu  = st.selectbox("Penghasilan Ibu",  list(range(0,10)))
-            sumber_listrik   = st.selectbox("Sumber Listrik", [0,1,2,3],
-                                             format_func=lambda x:{0:'Tidak Ada',1:'PLN',2:'Genset',3:'Solar'}.get(x,str(x)))
+
+            opts_payah = cat_options('Penghasilan_Ayah(22)')
+            sel_payah = st.selectbox(
+                "Penghasilan Ayah",
+                options=opts_payah if opts_payah else list(range(15))
+            )
+
+            opts_pibu = cat_options('Penghasilan_Ibu(26)')
+            sel_pibu = st.selectbox(
+                "Penghasilan Ibu",
+                options=opts_pibu if opts_pibu else list(range(10))
+            )
+
+            opts_listrik = cat_options('Sumber_Daya_Listrik(31)')
+            sel_listrik = st.selectbox(
+                "Sumber Daya Listrik",
+                options=opts_listrik if opts_listrik else ["Tidak Ada","PLN","Genset","Solar"]
+            )
+
         with c3:
             st.markdown("**Akademik**")
-            prestasi         = st.selectbox("Prestasi", [0,1,2,3],
-                                             format_func=lambda x:{0:'Tidak Ada',1:'Sekolah',2:'Kab/Kota',3:'Nasional'}.get(x,str(x)))
-            skor_kuesioner   = st.slider("Rata-rata Skor Kuesioner", 0.0, 10.0, 7.5, 0.1)
-            nilai_tes        = st.slider("Nilai Tes", 0, 100, 75)
+
+            opts_prestasi = cat_options('Prestasi(50)')
+            sel_prestasi = st.selectbox(
+                "Prestasi",
+                options=opts_prestasi if opts_prestasi else ["Tidak Ada","Sekolah","Kab/Kota","Nasional"]
+            )
+
+            skor_kuesioner = st.slider("Rata-rata Skor Kuesioner", 0.0, 10.0, 7.5, 0.1)
+            nilai_tes      = st.slider("Nilai Tes", 0, 100, 75)
 
         st.markdown("---")
-        sel_model = st.radio("Pilih Model", ["LightGBM GOSS", "XGBoost GBtree", "Keduanya"], horizontal=True)
+        sel_model = st.radio(
+            "Pilih Model",
+            ["LightGBM GOSS", "XGBoost GBtree", "Keduanya"],
+            horizontal=True
+        )
         submitted = st.form_submit_button("🔮 Prediksi Sekarang", use_container_width=True)
 
     if submitted:
+        # Konversi pilihan label → nilai encoded untuk model
+        enc_dtks    = to_encoded('Status_DTKS(7)',          sel_dtks)
+        enc_p3ke    = to_encoded('Status_P3KE(8)',          sel_p3ke)
+        enc_payah   = to_encoded('Penghasilan_Ayah(22)',    sel_payah)
+        enc_pibu    = to_encoded('Penghasilan_Ibu(26)',     sel_pibu)
+        enc_rmh     = to_encoded('Kepemilikan_Rumah(29)',   sel_rmh)
+        enc_listrik = to_encoded('Sumber_Daya_Listrik(31)', sel_listrik)
+        enc_prst    = to_encoded('Prestasi(50)',             sel_prestasi)
+
         new_data = pd.DataFrame({
-            'Status_DTKS(7)': [status_dtks], 'Status_P3KE(8)': [status_p3ke],
-            'Penghasilan_Ayah(22)': [penghasilan_ayah], 'Penghasilan_Ibu(26)': [penghasilan_ibu],
-            'Kepemilikan_Rumah(29)': [kepemilikan_rmh], 'Sumber_Daya_Listrik(31)': [sumber_listrik],
-            'Prestasi(50)': [prestasi],
-            'Rata-rata_Skor_Kuesioner': [skor_kuesioner], 'Nilai_Tes(51)': [nilai_tes]
+            'Status_DTKS(7)':           [enc_dtks],
+            'Status_P3KE(8)':           [enc_p3ke],
+            'Penghasilan_Ayah(22)':     [enc_payah],
+            'Penghasilan_Ibu(26)':      [enc_pibu],
+            'Kepemilikan_Rumah(29)':    [enc_rmh],
+            'Sumber_Daya_Listrik(31)':  [enc_listrik],
+            'Prestasi(50)':             [enc_prst],
+            'Rata-rata_Skor_Kuesioner': [skor_kuesioner],
+            'Nilai_Tes(51)':            [nilai_tes]
         })
-        # Align columns to training set
         for col in X_train.columns:
             if col not in new_data.columns:
                 new_data[col] = 0
         new_data = new_data[X_train.columns]
 
+        # ── Tampilkan hasil prediksi ──
         def show_pred(pred, prob_not_eligible, model_name):
             if pred == 0:
                 st.markdown(f"""
@@ -702,43 +800,57 @@ elif page == "🔮 Prediksi":
         if sel_model in ["LightGBM GOSS", "Keduanya"]:
             p = pred_lgbm.predict(new_data)[0]
             prob_lgbm = pred_lgbm.predict_proba(new_data)[0][1]
-            st.markdown('<div class="section-head"><span class="model-tag lgbm">LightGBM GOSS</span> Hasil</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-head"><span class="model-tag lgbm">LightGBM GOSS</span> Hasil</div>',
+                        unsafe_allow_html=True)
             show_pred(p, prob_lgbm, "LightGBM GOSS")
 
         if sel_model in ["XGBoost GBtree", "Keduanya"]:
             p = pred_xgb.predict(new_data)[0]
             prob_xgb = pred_xgb.predict_proba(new_data)[0][1]
-            st.markdown('<div class="section-head"><span class="model-tag xgb">XGBoost GBtree</span> Hasil</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-head"><span class="model-tag xgb">XGBoost GBtree</span> Hasil</div>',
+                        unsafe_allow_html=True)
             show_pred(p, prob_xgb, "XGBoost GBtree")
 
         if sel_model == "Keduanya" and prob_lgbm is not None and prob_xgb is not None:
             fig_g = make_subplots(rows=1, cols=2, specs=[[{"type":"indicator"},{"type":"indicator"}]])
-            for col, val, name, color in [
+            for gcol, val, gname, gcolor in [
                 (1, prob_lgbm*100, "LGBM GOSS<br>Prob. Tidak Layak (%)", "#3ecf8e"),
                 (2, prob_xgb*100,  "XGB GBtree<br>Prob. Tidak Layak (%)", "#f7b731")
             ]:
                 fig_g.add_trace(go.Indicator(
                     mode="gauge+number", value=val,
-                    title={'text': name},
-                    gauge=dict(axis=dict(range=[0,100]), bar=dict(color=color),
+                    title={'text': gname},
+                    gauge=dict(axis=dict(range=[0,100]), bar=dict(color=gcolor),
                                bgcolor="#1a2236",
-                               steps=[dict(range=[0,50],color="#132318"),dict(range=[50,100],color="#2d1212")])
-                ), row=1, col=col)
+                               steps=[dict(range=[0,50],color="#132318"),
+                                      dict(range=[50,100],color="#2d1212")])
+                ), row=1, col=gcol)
             fig_g.update_layout(paper_bgcolor='rgba(0,0,0,0)',
                                 font=dict(family='DM Sans', color='#e2e8f0'), height=280)
             st.plotly_chart(fig_g, use_container_width=True)
 
-        # Input summary
+        # ── Ringkasan input — tampilkan label asli (bukan angka) ──
         st.markdown('<div class="section-head">📋 Ringkasan Input</div>', unsafe_allow_html=True)
         input_disp = pd.DataFrame({
-            'Fitur': ['Status DTKS','Status P3KE','Penghasilan Ayah','Penghasilan Ibu',
-                      'Kepemilikan Rumah','Sumber Listrik','Prestasi','Skor Kuesioner','Nilai Tes'],
-            'Nilai': [status_dtks, status_p3ke, penghasilan_ayah, penghasilan_ibu,
-                      kepemilikan_rmh, sumber_listrik, prestasi, skor_kuesioner, nilai_tes]
+            'Fitur': [
+                'Status DTKS', 'Status P3KE', 'Penghasilan Ayah', 'Penghasilan Ibu',
+                'Kepemilikan Rumah', 'Sumber Daya Listrik', 'Prestasi',
+                'Skor Kuesioner', 'Nilai Tes'
+            ],
+            'Label (Pilihan)': [
+                sel_dtks, sel_p3ke, sel_payah, sel_pibu,
+                sel_rmh, sel_listrik, sel_prestasi,
+                skor_kuesioner, nilai_tes
+            ],
+            'Nilai Encoded (Model)': [
+                enc_dtks, enc_p3ke, enc_payah, enc_pibu,
+                enc_rmh, enc_listrik, enc_prst,
+                skor_kuesioner, nilai_tes
+            ]
         })
         st.dataframe(input_disp, use_container_width=True, hide_index=True)
 
-        # Download models
+        # ── Download model ──
         st.markdown('<div class="section-head">💾 Download Model</div>', unsafe_allow_html=True)
         dc1, dc2 = st.columns(2)
         with dc1:
